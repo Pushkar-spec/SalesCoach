@@ -1,0 +1,13 @@
+# Core Web Framework & Server
+fastapi==0.158.1
+uvicorn[standard]==0.54.0
+
+# Frontend UI Dashboard (Planned for Step 2+)
+streamlit==1.66.1
+
+# Configuration & Environment Variables
+python-dotenv==1.2.4
+
+# Testing & API Client
+pytest==9.1.1
+httpx==0.28.1
