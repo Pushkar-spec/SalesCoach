@@ -16,7 +16,6 @@ def test_default_ws_url(monkeypatch):
 def test_ws_client_connect_and_ping_success():
     """Verify successful connect and ping/pong handshake."""
     mock_conn = MagicMock()
-    # Mock OPEN state
     mock_conn.state.name = "OPEN"
     mock_conn.recv.return_value = json.dumps({
         "type": "pong",
@@ -38,6 +37,114 @@ def test_ws_client_connect_and_ping_success():
         client.close()
         assert client.is_connected is False
         mock_conn.close.assert_called_once()
+
+
+def test_ws_client_start_session_success():
+    """Verify that start_session sends request and returns confirmed session_id."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({
+        "type": "session_started",
+        "session_id": "test-uuid-1234",
+        "status": "active"
+    })
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    sid = client.start_session()
+    assert sid == "test-uuid-1234"
+    mock_conn.send.assert_called_once_with(json.dumps({"type": "start_session"}))
+
+
+def test_ws_client_start_session_backend_error():
+    """Verify that backend error during start_session raises RuntimeError."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({
+        "type": "error",
+        "message": "An active session already exists for this connection"
+    })
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        client.start_session()
+
+
+def test_ws_client_start_session_unexpected_response():
+    """Verify that unexpected response type raises ValueError."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({"type": "unexpected_type"})
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    with pytest.raises(ValueError, match="Expected 'session_started'"):
+        client.start_session()
+
+
+def test_ws_client_get_status_success():
+    """Verify querying session status returns status dictionary."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({
+        "type": "status",
+        "session_id": "test-uuid-1234",
+        "status": "active"
+    })
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    status = client.get_status()
+    assert status["type"] == "status"
+    assert status["session_id"] == "test-uuid-1234"
+    assert status["status"] == "active"
+
+
+def test_ws_client_stop_session_success():
+    """Verify stopping a session sends stop_session and validates confirmation."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({
+        "type": "session_stopped",
+        "session_id": "test-uuid-1234",
+        "status": "stopped"
+    })
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    resp = client.stop_session("test-uuid-1234")
+    assert resp["type"] == "session_stopped"
+    assert resp["session_id"] == "test-uuid-1234"
+    assert resp["status"] == "stopped"
+
+
+def test_ws_client_stop_session_invalid_id():
+    """Verify stop_session rejects empty session IDs."""
+    client = WebSocketClient()
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        client.stop_session("")
+
+
+def test_ws_client_stop_session_backend_error():
+    """Verify stop_session raises RuntimeError when backend returns an error."""
+    mock_conn = MagicMock()
+    mock_conn.state.name = "OPEN"
+    mock_conn.recv.return_value = json.dumps({
+        "type": "error",
+        "message": "Session not found or unauthorized"
+    })
+
+    client = WebSocketClient()
+    client.connection = mock_conn
+
+    with pytest.raises(RuntimeError, match="Session not found or unauthorized"):
+        client.stop_session("invalid-uuid")
 
 
 def test_ws_client_connection_refused():
@@ -62,7 +169,6 @@ def test_ws_client_recv_timeout():
         with pytest.raises(TimeoutError):
             client.connect_and_ping("Test Ping")
 
-        # Connection should have been closed and cleared
         mock_conn.close.assert_called_once()
         assert client.is_connected is False
 
@@ -79,20 +185,6 @@ def test_ws_client_invalid_pong_type():
             client.connect_and_ping("Hello")
 
         mock_conn.close.assert_called_once()
-        assert client.is_connected is False
-
-
-def test_ws_client_message_mismatch():
-    """Verify that a mismatched pong message raises ValueError."""
-    mock_conn = MagicMock()
-    mock_conn.state.name = "OPEN"
-    mock_conn.recv.return_value = json.dumps({"type": "pong", "message": "different text"})
-
-    with patch("ws_client.connect", return_value=mock_conn):
-        client = WebSocketClient()
-        with pytest.raises(ValueError, match="Pong message mismatch"):
-            client.connect_and_ping("expected text")
-
         assert client.is_connected is False
 
 

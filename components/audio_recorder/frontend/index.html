@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Browser Microphone Capture — Real-Time AI Sales Copilot</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="recorder-card" id="recorder-card">
+    <!-- Header -->
+    <div class="card-header">
+      <div class="header-title-group">
+        <span class="header-title">🎙️ Live Audio Telemetry</span>
+        <span class="status-pill status-idle" id="status-pill">IDLE</span>
+      </div>
+      <div class="header-meta">
+        <span>Format: <code>PCM16 / 16kHz / Mono / 250ms</code></span>
+      </div>
+    </div>
+
+    <!-- Status Description -->
+    <div class="status-desc" id="status-text">
+      Ready. Click "Start Call" above to begin session and microphone streaming.
+    </div>
+
+    <!-- Live Audio Meter -->
+    <div class="meter-container">
+      <span class="meter-label">MIC INPUT:</span>
+      <div class="meter-track">
+        <div class="meter-fill" id="meter-fill"></div>
+      </div>
+    </div>
+
+    <!-- Metrics Grid -->
+    <div class="metrics-grid">
+      <div class="metric-item">
+        <span class="metric-title">Session ID</span>
+        <span class="metric-value" id="val-session-id" title="Server Session UUID">None</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-title">Audio State</span>
+        <span class="metric-value" id="val-audio-state">idle</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-title">Chunks Sent</span>
+        <span class="metric-value" id="val-chunks">0</span>
+      </div>
+      <div class="metric-item">
+        <span class="metric-title">Bytes Sent</span>
+        <span class="metric-value" id="val-bytes">0 B</span>
+      </div>
+    </div>
+
+    <!-- Error Alert Box -->
+    <div class="error-box" id="error-box">
+      <span class="error-icon">⚠️</span>
+      <span id="error-message"></span>
+    </div>
+
+    <!-- Footer metadata -->
+    <div class="footer-info">
+      <span>Target WebSocket: <code id="val-endpoint">ws://127.0.0.1:8000/ws</code></span>
+      <span>Direct Browser-to-Backend Audio Stream</span>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="audio-utils.js"></script>
+  <script src="recorder.js"></script>
+</body>
+</html>
