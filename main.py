@@ -237,17 +237,21 @@ async def websocket_endpoint(websocket: WebSocket):
                         connection_id, req_session_id
                     )
                     logger.info(
-                        "Audio stopped: connection_id=%s session_id=%s chunks=%d bytes=%d",
+                        "Audio stopped: connection_id=%s session_id=%s chunks=%d bytes=%d duration=%.3fs expected=%d",
                         connection_id,
                         metrics["session_id"],
                         metrics["audio_chunk_count"],
                         metrics["audio_bytes_received"],
+                        metrics["audio_duration_seconds"],
+                        metrics["expected_audio_bytes"],
                     )
                     await websocket.send_json({
                         "type": "audio_stopped",
                         "session_id": metrics["session_id"],
                         "audio_chunk_count": metrics["audio_chunk_count"],
                         "audio_bytes_received": metrics["audio_bytes_received"],
+                        "audio_duration_seconds": metrics["audio_duration_seconds"],
+                        "expected_audio_bytes": metrics["expected_audio_bytes"],
                     })
                 except (InvalidSessionError, AudioStateError) as exc:
                     logger.warning(
@@ -258,6 +262,26 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({
                         "type": "error",
                         "message": str(exc),
+                    })
+
+            # Query real-time audio metrics and diagnostics
+            elif message_type == "audio_metrics":
+                req_session_id = payload.get("session_id")
+                active_session = default_session_manager.get_active_session(connection_id)
+                sid = req_session_id or (active_session["session_id"] if active_session else None)
+                if sid:
+                    try:
+                        metrics = default_session_manager.get_audio_metrics(connection_id, sid)
+                        await websocket.send_json({
+                            "type": "audio_metrics",
+                            **metrics,
+                        })
+                    except InvalidSessionError as exc:
+                        await websocket.send_json({"type": "error", "message": str(exc)})
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "No active session for audio metrics query",
                     })
 
             # Unsupported message types

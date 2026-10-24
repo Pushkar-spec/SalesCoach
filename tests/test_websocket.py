@@ -375,12 +375,12 @@ def test_websocket_binary_audio_frames_and_stop_audio():
         # Stop audio
         websocket.send_json({"type": "stop_audio", "session_id": sid})
         stop_resp = websocket.receive_json()
-        assert stop_resp == {
-            "type": "audio_stopped",
-            "session_id": sid,
-            "audio_chunk_count": 3,
-            "audio_bytes_received": 9600,
-        }
+        assert stop_resp["type"] == "audio_stopped"
+        assert stop_resp["session_id"] == sid
+        assert stop_resp["audio_chunk_count"] == 3
+        assert stop_resp["audio_bytes_received"] == 9600
+        assert "audio_duration_seconds" in stop_resp
+        assert "expected_audio_bytes" in stop_resp
 
 
 def test_websocket_binary_audio_rejected_empty_and_odd():
@@ -621,12 +621,12 @@ def test_websocket_browser_recorder_lifecycle_simulation():
         # Step 9: The backend acknowledges stop_audio and returns final counters
         ws.send_json({"type": "stop_audio", "session_id": sid})
         res_stop_audio = ws.receive_json()
-        assert res_stop_audio == {
-            "type": "audio_stopped",
-            "session_id": sid,
-            "audio_chunk_count": 4,
-            "audio_bytes_received": 32000,
-        }
+        assert res_stop_audio["type"] == "audio_stopped"
+        assert res_stop_audio["session_id"] == sid
+        assert res_stop_audio["audio_chunk_count"] == 4
+        assert res_stop_audio["audio_bytes_received"] == 32000
+        assert "audio_duration_seconds" in res_stop_audio
+        assert "expected_audio_bytes" in res_stop_audio
 
         # Step 10: The browser ends the session
         ws.send_json({"type": "stop_session", "session_id": sid})

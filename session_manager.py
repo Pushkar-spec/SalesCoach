@@ -10,6 +10,7 @@ All session records are stored in-memory and will not persist across backend ser
 
 from datetime import datetime, timezone
 import logging
+import time
 from typing import Any, Optional
 import uuid
 
@@ -95,10 +96,16 @@ class SessionManager:
             "connection_id": connection_id,
             "status": "active",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            # Audio streaming state (Step 2.2)
+            "created_at_perf": time.perf_counter(),
+            # Audio streaming state & diagnostics (Step 2.2 & 2.6)
             "audio_state": "idle",
             "audio_chunk_count": 0,
             "audio_bytes_received": 0,
+            "audio_started_at_perf": None,
+            "audio_stopped_at_perf": None,
+            "audio_duration_seconds": 0.0,
+            "last_chunk_at_perf": None,
+            "expected_audio_bytes": 0,
         }
 
         self._sessions[session_id] = session
@@ -191,6 +198,12 @@ class SessionManager:
             )
 
         session["audio_state"] = "streaming"
+        session["audio_started_at_perf"] = time.perf_counter()
+        session["last_chunk_at_perf"] = None
+        session["audio_chunk_count"] = 0
+        session["audio_bytes_received"] = 0
+        session["audio_duration_seconds"] = 0.0
+        session["expected_audio_bytes"] = 0
         logger.info(
             "Audio started for session_id=%s connection_id=%s (format=%s, rate=%d, channels=%d)",
             session_id,
@@ -210,7 +223,8 @@ class SessionManager:
             session_id: The active session ID.
 
         Returns:
-            dict: Summary containing session_id, audio_chunk_count, and audio_bytes_received.
+            dict: Summary containing session_id, audio_chunk_count, audio_bytes_received,
+                  audio_duration_seconds, and expected_audio_bytes.
         """
         if not session_id or not isinstance(session_id, str):
             raise InvalidSessionError("Session ID must be a non-empty string")
@@ -234,18 +248,31 @@ class SessionManager:
             )
             raise AudioStateError("Audio is not streaming for this session")
 
+        now = time.perf_counter()
         session["audio_state"] = "idle"
+        session["audio_stopped_at_perf"] = now
+        started = session.get("audio_started_at_perf")
+        duration = max(0.0, now - started) if started is not None else 0.0
+        session["audio_duration_seconds"] = duration
+        # 16000 samples/sec * 2 bytes/sample (pcm16) = 32000 bytes/sec
+        expected_bytes = int(duration * 32000)
+        session["expected_audio_bytes"] = expected_bytes
+
         logger.info(
-            "Audio stopped for session_id=%s connection_id=%s (chunks=%d, bytes=%d)",
+            "Audio stopped for session_id=%s connection_id=%s (chunks=%d, bytes=%d, duration=%.3fs, expected_bytes=%d)",
             session_id,
             connection_id,
             session["audio_chunk_count"],
             session["audio_bytes_received"],
+            duration,
+            expected_bytes,
         )
         return {
             "session_id": session["session_id"],
             "audio_chunk_count": session["audio_chunk_count"],
             "audio_bytes_received": session["audio_bytes_received"],
+            "audio_duration_seconds": round(duration, 3),
+            "expected_audio_bytes": expected_bytes,
         }
 
     def record_audio_chunk(self, connection_id: str, byte_count: int) -> dict[str, Any]:
@@ -276,6 +303,7 @@ class SessionManager:
                 "Invalid audio frame length: PCM16 requires an even number of bytes"
             )
 
+        active_session["last_chunk_at_perf"] = time.perf_counter()
         active_session["audio_chunk_count"] += 1
         active_session["audio_bytes_received"] += byte_count
 
@@ -284,6 +312,75 @@ class SessionManager:
             "audio_chunk_count": active_session["audio_chunk_count"],
             "audio_bytes_received": active_session["audio_bytes_received"],
         }
+
+    def get_audio_metrics(self, connection_id: str, session_id: str) -> dict[str, Any]:
+        """
+        Get current audio metrics, duration, and staleness information.
+
+        Args:
+            connection_id: Server-assigned connection ID.
+            session_id: Active or stopped session ID.
+
+        Returns:
+            dict: Audio metrics summary.
+        """
+        if not session_id or not isinstance(session_id, str):
+            raise InvalidSessionError("Session ID must be a non-empty string")
+
+        session = self._sessions.get(session_id)
+        if session is None or session.get("connection_id") != connection_id:
+            raise InvalidSessionError("Session not found or unauthorized")
+
+        now = time.perf_counter()
+        started = session.get("audio_started_at_perf")
+        if session.get("audio_state") == "streaming" and started is not None:
+            duration = max(0.0, now - started)
+        else:
+            duration = session.get("audio_duration_seconds", 0.0)
+
+        last_chunk = session.get("last_chunk_at_perf")
+        time_since_last_chunk = (
+            max(0.0, now - last_chunk) if last_chunk is not None else None
+        )
+
+        return {
+            "session_id": session["session_id"],
+            "audio_state": session.get("audio_state", "idle"),
+            "audio_chunk_count": session.get("audio_chunk_count", 0),
+            "audio_bytes_received": session.get("audio_bytes_received", 0),
+            "audio_duration_seconds": round(duration, 3),
+            "expected_audio_bytes": int(duration * 32000),
+            "time_since_last_chunk_seconds": (
+                round(time_since_last_chunk, 3) if time_since_last_chunk is not None else None
+            ),
+        }
+
+    def check_audio_staleness(self, connection_id: str, max_idle_seconds: float = 5.0) -> bool:
+        """
+        Check if an active streaming session has stalled without receiving audio chunks.
+
+        Args:
+            connection_id: The connection ID to inspect.
+            max_idle_seconds: Maximum allowed time without chunks (default 5.0 seconds).
+
+        Returns:
+            bool: True if audio is streaming and stalled past threshold, False otherwise.
+        """
+        active_session = self.get_active_session(connection_id)
+        if not active_session or active_session.get("audio_state") != "streaming":
+            return False
+
+        now = time.perf_counter()
+        last_chunk = active_session.get("last_chunk_at_perf")
+        started = active_session.get("audio_started_at_perf")
+
+        if last_chunk is not None:
+            return (now - last_chunk) > max_idle_seconds
+        elif started is not None:
+            # No chunks received since audio started
+            return (now - started) > max_idle_seconds
+
+        return False
 
     def stop_session(self, connection_id: str, session_id: str) -> dict[str, Any]:
         """
@@ -322,9 +419,16 @@ class SessionManager:
             )
             raise InvalidSessionError("Session is not active")
 
+        now = time.perf_counter()
         # Automatically stop audio streaming if active
         if session.get("audio_state") == "streaming":
             session["audio_state"] = "idle"
+            session["audio_stopped_at_perf"] = now
+            started = session.get("audio_started_at_perf")
+            if started is not None:
+                duration = max(0.0, now - started)
+                session["audio_duration_seconds"] = duration
+                session["expected_audio_bytes"] = int(duration * 32000)
             logger.info(
                 "Audio automatically stopped on session stop: session_id=%s",
                 session_id,
@@ -333,6 +437,10 @@ class SessionManager:
         # Mark session as stopped
         session["status"] = "stopped"
         session["stopped_at"] = datetime.now(timezone.utc).isoformat()
+        session["stopped_at_perf"] = now
+        created_perf = session.get("created_at_perf")
+        if created_perf is not None:
+            session["total_duration_seconds"] = round(max(0.0, now - created_perf), 3)
 
         # Release connection's active session reference
         if self._active_connections.get(connection_id) == session_id:
@@ -359,11 +467,18 @@ class SessionManager:
         session_id = self._active_connections.pop(connection_id, None)
         if session_id and session_id in self._sessions:
             session = self._sessions[session_id]
+            now = time.perf_counter()
             if session.get("audio_state") == "streaming":
                 session["audio_state"] = "idle"
+                session["audio_stopped_at_perf"] = now
+                started = session.get("audio_started_at_perf")
+                if started is not None:
+                    session["audio_duration_seconds"] = round(max(0.0, now - started), 3)
+                    session["expected_audio_bytes"] = int(session["audio_duration_seconds"] * 32000)
             if session.get("status") == "active":
                 session["status"] = "stopped"
                 session["stopped_at"] = datetime.now(timezone.utc).isoformat()
+                session["stopped_at_perf"] = now
                 logger.info(
                     "Cleaned up session on disconnect: session_id=%s for connection_id=%s",
                     session_id,

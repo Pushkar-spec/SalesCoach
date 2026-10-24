@@ -4,15 +4,15 @@ A real-time AI assistant designed to listen to sales conversations, provide live
 
 ---
 
-## Current Status: Step 2.4 Complete (Unified Browser Audio & Call Controls)
+## Current Status: Step 2.6 Complete (Measure & Harden the Audio Pipeline)
 
 - [x] **FastAPI Application**: Running server with `GET /`, `GET /health`, and WebSocket `ws://127.0.0.1:8000/ws`.
-- [x] **In-Memory Session Manager**: Server-side session tracking (`session_manager.py`) with UUID generation, connection-level session isolation, and lifecycle cleanup on disconnect.
-- [x] **Structured Message Protocol**: Support for `ping`/`pong`, `start_session`, `status`, `stop_session`, and structured error messages.
-- [x] **Backend Audio Protocol**: Extended protocol support for `start_audio`, `stop_audio`, and binary PCM16 frames with chunk/byte metrics and validation.
-- [x] **Browser Microphone Capture Component**: Native JavaScript Web Audio capture component (`components/audio_recorder`) with automatic 16kHz resampling, little-endian PCM16 conversion, ~250ms chunk accumulator, and direct binary WebSocket streaming to FastAPI.
-- [x] **Unified Streamlit Call Controls**: The main Call Controls (`▶ Start Call`, `⏹ Stop Call`, `🔄 Reset Session`) directly drive the browser microphone capture and its WebSocket stream with one authoritative live session. Duplicate standalone recorder buttons have been removed and replaced with a real-time live telemetry card.
-- [x] **Automated Testing**: 78 deterministic `pytest` tests and 11 Node.js audio unit tests covering HTTP routes, WebSocket protocols, unified UI command lifecycles, idempotent controls, audio math, and session rules.
+- [x] **In-Memory Session Manager**: Server-side session tracking (`session_manager.py`) with monotonic clock diagnostics (`time.perf_counter`), UUID generation, connection-level session isolation, stall detection (`check_audio_staleness`), and lifecycle cleanup on disconnect.
+- [x] **Structured Message Protocol**: Support for `ping`/`pong`, `start_session`, `status`, `stop_session`, `start_audio`, `stop_audio`, `audio_metrics`, and structured error messages.
+- [x] **Harded Audio Pipeline**: Bounded timeouts for WebSocket connection (5s), control messages (5s), and shutdown acknowledgement (3s bounded fallback), plus 5s streaming stall detector. Immediate track and node teardown on stop/reset.
+- [x] **Audio Diagnostics & Telemetry**: Lightweight measurement of recording duration, audio chunks/bytes sent vs received, expected vs actual bytes (at 32 kB/s), startup latency, and shutdown latency. Real-time telemetry card with live duration and startup latency display.
+- [x] **Unified Streamlit Call Controls**: The main Call Controls (`▶ Start Call`, `⏹ Stop Call`, `🔄 Reset Session`) directly drive the browser microphone capture and its WebSocket stream with one authoritative live session.
+- [x] **Automated Testing**: 99 deterministic `pytest` tests and 13 Node.js audio unit tests covering HTTP routes, WebSocket protocols, variable recording durations, synthetic audio signals (silence, sine, noise), audio stalls, and graceful cleanup.
 - [x] **Virtual Environment**: Python 3.12 virtual environment established (`venv`).
 - [x] **Environment Config**: `.gitignore` and `.env.example` templates created.
 - [x] **Version Control**: Git repository initialized with appropriate ignore rules.
@@ -21,7 +21,7 @@ A real-time AI assistant designed to listen to sales conversations, provide live
 - [ ] **Retrieval-Augmented Generation (RAG)**: *Planned for Phase 5*
 - [ ] **ML Objection Classifier**: *Planned for Phase 6*
 
-> **Important Architecture & Deployment Note**: In Step 2.4, the user workflow is fully unified. Clicking `▶ Start Call` in the Streamlit UI sends an authoritative start command to the browser audio component, which requests microphone access, connects to the FastAPI backend, and streams 16kHz PCM16 audio frames. Clicking `⏹ Stop Call` stops the stream and terminates the session cleanly. `ws_client.py` is reserved exclusively for non-browser/script testing. When deployed to HTTPS environments, browsers require a secure origin (`https://`) to grant microphone access, and the WebSocket target must use `wss://`.
+> **Important Architecture & Deployment Note**: In Step 2.6, the audio transport pipeline is comprehensively measured and hardened. Clicking `▶ Start Call` in the Streamlit UI sends an authoritative start command to the browser audio component, which requests microphone access, connects to the FastAPI backend, and streams 16kHz PCM16 audio frames. Bounded timeouts ensure neither the frontend nor backend can hang during connection or shutdown. Clicking `⏹ Stop Call` stops the stream and releases microphone tracks immediately. When deployed to HTTPS environments, browsers require a secure origin (`https://`) to grant microphone access, and the WebSocket target must use `wss://`.
 
 
 
@@ -197,7 +197,9 @@ The `/ws` endpoint exchanges JSON text frames following a structured request/res
     "type": "audio_stopped",
     "session_id": "0f7e0689-f647-46e2-9bec-a041b311a321",
     "audio_chunk_count": 42,
-    "audio_bytes_received": 134400
+    "audio_bytes_received": 134400,
+    "audio_duration_seconds": 4.205,
+    "expected_audio_bytes": 134560
   }
   ```
 - **Server Response (Not Streaming)**:
@@ -205,6 +207,28 @@ The `/ws` endpoint exchanges JSON text frames following a structured request/res
   {
     "type": "error",
     "message": "Cannot stop audio: audio is not streaming for session 0f7e0689-f647-46e2-9bec-a041b311a321"
+  }
+  ```
+
+### 8. Query Audio Streaming Metrics
+- **Client Request**:
+  ```json
+  {
+    "type": "audio_metrics",
+    "session_id": "0f7e0689-f647-46e2-9bec-a041b311a321"
+  }
+  ```
+- **Server Response (Success)**:
+  ```json
+  {
+    "type": "audio_metrics",
+    "session_id": "0f7e0689-f647-46e2-9bec-a041b311a321",
+    "audio_state": "streaming",
+    "audio_chunk_count": 12,
+    "audio_bytes_received": 96000,
+    "audio_duration_seconds": 3.012,
+    "expected_audio_bytes": 96384,
+    "time_since_last_chunk_seconds": 0.084
   }
   ```
 

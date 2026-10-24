@@ -159,4 +159,36 @@ describe("Audio Utils — AudioChunkAccumulator", () => {
     assert.strictEqual(accumulator.totalBytes, 0);
     assert.strictEqual(accumulator.getStats().bufferedSamples, 0);
   });
+
+  test("processes synthetic noisy audio without buffer or byte corruption", () => {
+    // Generate 1000 samples of pseudo-random noise [-1.5, 1.5] to test clamping
+    const noise = new Float32Array(1000);
+    for (let i = 0; i < noise.length; i++) {
+      noise[i] = Math.sin(i * 123.456) * 1.5;
+    }
+    const buffer = floatTo16BitPCM(noise);
+    assert.strictEqual(buffer.byteLength, 2000);
+    const view = new DataView(buffer);
+    for (let i = 0; i < 1000; i++) {
+      const val = view.getInt16(i * 2, true);
+      assert.ok(val >= -32768 && val <= 32767);
+    }
+  });
+
+  test("flushes partial final chunks with odd sample count guaranteeing even byte length", () => {
+    const emittedChunks = [];
+    const accumulator = new AudioChunkAccumulator({
+      chunkSampleCount: 4000,
+      onChunk: (buffer) => emittedChunks.push(buffer),
+    });
+
+    // 17 samples (odd sample count)
+    accumulator.push(new Float32Array(17));
+    accumulator.flush(true);
+    assert.strictEqual(emittedChunks.length, 1);
+    // 17 samples * 2 = 34 bytes (strictly even byte length for PCM16)
+    assert.strictEqual(emittedChunks[0].byteLength, 34);
+    assert.strictEqual(emittedChunks[0].byteLength % 2, 0);
+  });
 });
+

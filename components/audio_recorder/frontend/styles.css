@@ -159,7 +159,7 @@ body {
 /* Metrics Grid */
 .metrics-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(85px, 1fr));
   gap: 10px;
   background: rgba(0, 0, 0, 0.2);
   border-radius: 8px;

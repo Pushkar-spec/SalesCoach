@@ -179,6 +179,15 @@ with st.sidebar:
         label="Audio Chunks Sent",
         value=st.session_state.audio_metrics.get("chunks_sent", 0),
     )
+    if st.session_state.audio_metrics.get("bytes_sent", 0) > 0:
+        st.metric(
+            label="Audio Bytes Sent",
+            value=f"{st.session_state.audio_metrics.get('bytes_sent', 0):,} B",
+        )
+    if st.session_state.audio_metrics.get("startup_latency_ms", 0) > 0:
+        st.caption(f"Startup Latency: `{st.session_state.audio_metrics.get('startup_latency_ms', 0)} ms`")
+    if st.session_state.audio_metrics.get("shutdown_latency_ms", 0) > 0:
+        st.caption(f"Shutdown Latency: `{st.session_state.audio_metrics.get('shutdown_latency_ms', 0)} ms`")
 
     st.divider()
 
@@ -295,6 +304,9 @@ if recorder_event and isinstance(recorder_event, dict):
         bytes_cnt = recorder_event.get("bytes_sent", 0)
         st.session_state.audio_metrics["chunks_sent"] = chunks
         st.session_state.audio_metrics["bytes_sent"] = bytes_cnt
+        metrics = recorder_event.get("metrics")
+        if isinstance(metrics, dict):
+            st.session_state.audio_metrics.update(metrics)
         st.session_state.status_message = (
             f"Call stopped. Finalized audio stream ({chunks} chunks transmitted)."
         )

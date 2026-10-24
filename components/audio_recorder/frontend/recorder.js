@@ -20,6 +20,12 @@
   const CHUNK_DURATION_MS = 250;
   const SAMPLES_PER_CHUNK = Math.round((TARGET_SAMPLE_RATE * CHUNK_DURATION_MS) / 1000); // 4000 samples = 8000 bytes
 
+  // Bounded timeouts (Step 2.6)
+  const WS_CONNECT_TIMEOUT_MS = 5000;
+  const CONTROL_TIMEOUT_MS = 5000;
+  const SHUTDOWN_TIMEOUT_MS = 3000;
+  const AUDIO_STALL_TIMEOUT_MS = 5000;
+
   // State enum
   const State = {
     IDLE: "idle",
@@ -51,9 +57,23 @@
       // WebSocket
       this.ws = null;
 
-      // Metrics
+      // Metrics & Monotonic Timings (Step 2.6)
       this.chunksSent = 0;
       this.bytesSent = 0;
+      this.startCallTime = null;
+      this.audioStreamingStartTime = null;
+      this.stopCallTime = null;
+      this.startupLatencyMs = 0;
+      this.shutdownLatencyMs = 0;
+      this.recordingDurationMs = 0;
+      this.lastChunkSentTime = null;
+      this.interruptionCount = 0;
+
+      // Bounded Timers
+      this.connectTimer = null;
+      this.controlTimer = null;
+      this.shutdownTimer = null;
+      this.stallCheckInterval = null;
 
       // DOM Elements (bound on init)
       this.elements = {};
@@ -75,6 +95,8 @@
         audioStateVal: document.getElementById("val-audio-state"),
         chunksVal: document.getElementById("val-chunks"),
         bytesVal: document.getElementById("val-bytes"),
+        valDuration: document.getElementById("val-duration"),
+        valLatency: document.getElementById("val-latency"),
         meterFill: document.getElementById("meter-fill"),
         endpointText: document.getElementById("val-endpoint"),
       };
@@ -140,12 +162,23 @@
      */
     _notifyStreamlit(overrideState = null) {
       if (window.parent && window.parent !== window) {
+        let durationMs = this.recordingDurationMs;
+        if (!durationMs && this.audioStreamingStartTime) {
+          durationMs = Math.round(performance.now() - this.audioStreamingStartTime);
+        }
         const payload = {
           state: overrideState || this.state,
           session_id: this.sessionId,
           audio_state: this.isAudioStreaming ? "streaming" : "idle",
           chunks_sent: this.chunksSent,
           bytes_sent: this.bytesSent,
+          metrics: {
+            startup_latency_ms: Math.round(this.startupLatencyMs || 0),
+            shutdown_latency_ms: Math.round(this.shutdownLatencyMs || 0),
+            recording_duration_ms: Math.round(durationMs || 0),
+            expected_bytes: Math.round(((durationMs || 0) / 1000) * 32000),
+            interruptions: this.interruptionCount,
+          },
           error: this.errorMessage || null,
           status_message: this.statusMessage || null,
         };
@@ -218,6 +251,8 @@
         audioStateVal,
         chunksVal,
         bytesVal,
+        valDuration,
+        valLatency,
         meterFill,
         endpointText,
       } = this.elements;
@@ -247,6 +282,18 @@
         } else {
           bytesVal.textContent = this.bytesSent + " B";
         }
+      }
+
+      if (valDuration) {
+        let dur = 0;
+        if (this.audioStreamingStartTime) {
+          dur = ((this.stopCallTime || performance.now()) - this.audioStreamingStartTime) / 1000;
+        }
+        valDuration.textContent = Math.max(0, dur).toFixed(1) + " s";
+      }
+
+      if (valLatency) {
+        valLatency.textContent = this.startupLatencyMs > 0 ? `${this.startupLatencyMs} ms` : "--";
       }
 
       if (meterFill && !this.isAudioStreaming) {
@@ -331,14 +378,25 @@
       }
 
       this._clearError();
+      this._clearTimers();
       this.chunksSent = 0;
       this.bytesSent = 0;
       this.sessionId = null;
       this.isAudioStreaming = false;
 
+      // Monotonic timing initialization
+      this.startCallTime = performance.now();
+      this.audioStreamingStartTime = null;
+      this.stopCallTime = null;
+      this.startupLatencyMs = 0;
+      this.shutdownLatencyMs = 0;
+      this.recordingDurationMs = 0;
+      this.lastChunkSentTime = null;
+
       // 1. Verify Browser Web Audio & MediaDevices Support
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         const err = "Microphone capture is not supported in this browser or iframe environment.";
+        this.interruptionCount++;
         this._showError(err);
         this._notifyStreamlit("error");
         return;
@@ -368,6 +426,7 @@
         } else {
           msg = `Microphone access error: ${err.message || err.name}`;
         }
+        this.interruptionCount++;
         this._cleanupResources();
         this._showError(msg);
         this._notifyStreamlit("error");
@@ -385,6 +444,7 @@
           await this.audioContext.resume();
         }
       } catch (err) {
+        this.interruptionCount++;
         this._cleanupResources();
         const msg = `Failed to initialize Web Audio API: ${err.message}`;
         this._showError(msg);
@@ -407,6 +467,7 @@
         this.ws = new WebSocket(this.backendWsUrl);
         this.ws.binaryType = "arraybuffer";
       } catch (err) {
+        this.interruptionCount++;
         this._cleanupResources();
         const msg = `Failed to connect to backend at ${this.backendWsUrl}: ${err.message}`;
         this._showError(msg);
@@ -414,9 +475,27 @@
         return;
       }
 
+      // Bounded connection timer
+      this.connectTimer = setTimeout(() => {
+        if (this.state === State.REQUESTING_PERMISSION || this.state === State.RECORDING) {
+          console.warn("[AudioRecorder] WebSocket connection timed out.");
+          this.interruptionCount++;
+          this._cleanupResources();
+          this._showError(`WebSocket connection timed out (${WS_CONNECT_TIMEOUT_MS}ms). Backend may be down.`);
+          this._notifyStreamlit("error");
+        }
+      }, WS_CONNECT_TIMEOUT_MS);
+
       this.ws.onopen = () => {
+        if (this.connectTimer) {
+          clearTimeout(this.connectTimer);
+          this.connectTimer = null;
+        }
         console.log("[AudioRecorder] WebSocket connected. Sending start_session...");
         this.ws.send(JSON.stringify({ type: "start_session" }));
+
+        // Bounded control response timer for session_started
+        this._startControlTimer("session_started");
       };
 
       this.ws.onmessage = (event) => {
@@ -432,8 +511,10 @@
 
       this.ws.onerror = (err) => {
         console.error("[AudioRecorder] WebSocket error:", err);
+        this._clearTimers();
         if (this.state === State.RECORDING || this.state === State.REQUESTING_PERMISSION) {
-          const msg = "WebSocket connection failed.";
+          this.interruptionCount++;
+          const msg = "WebSocket connection error.";
           this._cleanupResources();
           this._showError(msg);
           this._notifyStreamlit("error");
@@ -442,7 +523,9 @@
 
       this.ws.onclose = (event) => {
         console.log(`[AudioRecorder] WebSocket closed (code: ${event.code})`);
+        this._clearTimers();
         if (this.state === State.RECORDING) {
+          this.interruptionCount++;
           this._showError("Backend WebSocket connection closed unexpectedly.");
           this._cleanupResources();
           this._notifyStreamlit("error");
@@ -452,9 +535,28 @@
       };
     }
 
+    _startControlTimer(expectedType) {
+      if (this.controlTimer) clearTimeout(this.controlTimer);
+      this.controlTimer = setTimeout(() => {
+        console.warn(`[AudioRecorder] Timed out waiting for '${expectedType}' response.`);
+        this.interruptionCount++;
+        this._cleanupResources();
+        this._showError(`Server response timed out waiting for '${expectedType}'.`);
+        this._notifyStreamlit("error");
+      }, CONTROL_TIMEOUT_MS);
+    }
+
+    _clearControlTimer() {
+      if (this.controlTimer) {
+        clearTimeout(this.controlTimer);
+        this.controlTimer = null;
+      }
+    }
+
     _handleControlMessage(data) {
       switch (data.type) {
         case "session_started":
+          this._clearControlTimer();
           this.sessionId = data.session_id;
           console.log("[AudioRecorder] Session confirmed by backend:", this.sessionId);
           // Request audio start with protocol specifications
@@ -467,17 +569,25 @@
               channels: 1,
             })
           );
+          this._startControlTimer("audio_started");
           break;
 
         case "audio_started":
+          this._clearControlTimer();
           console.log("[AudioRecorder] Audio stream started by backend. Wiring audio nodes.");
+          this.audioStreamingStartTime = performance.now();
+          if (this.startCallTime) {
+            this.startupLatencyMs = Math.round(this.audioStreamingStartTime - this.startCallTime);
+          }
           this.isAudioStreaming = true;
           this._startAudioPipeline();
+          this._startStallDetector();
           this._setState(State.RECORDING, "Microphone streaming 16kHz PCM16 audio.");
           this._notifyStreamlit("recording");
           break;
 
         case "audio_stopped":
+          this._clearControlTimer();
           console.log(
             `[AudioRecorder] Audio stopped: chunks=${data.audio_chunk_count}, bytes=${data.audio_bytes_received}`
           );
@@ -490,18 +600,22 @@
                 session_id: this.sessionId,
               })
             );
+            this._startControlTimer("session_stopped");
           } else {
             this._finishTeardown();
           }
           break;
 
         case "session_stopped":
+          this._clearControlTimer();
           console.log("[AudioRecorder] Session terminated confirmation received.");
           this._finishTeardown();
           break;
 
         case "error":
+          this._clearTimers();
           console.warn("[AudioRecorder] Backend error:", data.message);
+          this.interruptionCount++;
           this._cleanupResources();
           this._showError(`Server error: ${data.message}`);
           this._notifyStreamlit("error");
@@ -560,12 +674,51 @@
 
       try {
         this.ws.send(pcmBuffer);
+        this.lastChunkSentTime = performance.now();
         this.chunksSent += 1;
         this.bytesSent += pcmBuffer.byteLength;
         // Update DOM metrics directly (fast, no Streamlit rerun)
         this._updateUI();
       } catch (err) {
         console.warn("[AudioRecorder] Error sending chunk:", err);
+      }
+    }
+
+    _startStallDetector() {
+      this._stopStallDetector();
+      this.stallCheckInterval = setInterval(() => {
+        if (this.state === State.RECORDING && this.isAudioStreaming) {
+          const now = performance.now();
+          const lastActivity = this.lastChunkSentTime || this.audioStreamingStartTime;
+          if (lastActivity && (now - lastActivity) > AUDIO_STALL_TIMEOUT_MS) {
+            console.warn("[AudioRecorder] Warning: No audio chunks emitted in 5s. Microphone may be muted or stalled.");
+            if (this.elements.statusText) {
+              this.elements.statusText.textContent = "Warning: Microphone input stalled (no audio for 5s).";
+            }
+          }
+        }
+      }, 1000);
+    }
+
+    _stopStallDetector() {
+      if (this.stallCheckInterval) {
+        clearInterval(this.stallCheckInterval);
+        this.stallCheckInterval = null;
+      }
+    }
+
+    _clearTimers() {
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer);
+        this.connectTimer = null;
+      }
+      if (this.controlTimer) {
+        clearTimeout(this.controlTimer);
+        this.controlTimer = null;
+      }
+      if (this.shutdownTimer) {
+        clearTimeout(this.shutdownTimer);
+        this.shutdownTimer = null;
       }
     }
 
@@ -577,8 +730,15 @@
         return; // Idempotent check
       }
 
+      this.stopCallTime = performance.now();
+      if (this.audioStreamingStartTime) {
+        this.recordingDurationMs = Math.round(this.stopCallTime - this.audioStreamingStartTime);
+      }
+
       this._setState(State.STOPPING, "Stopping audio stream...");
       this.isAudioStreaming = false;
+      this._stopStallDetector();
+      this._clearTimers();
 
       // Flush remaining accumulator samples
       if (this.accumulator) {
@@ -587,6 +747,12 @@
 
       // Stop audio hardware immediately
       this._stopAudioHardware();
+
+      // Bounded shutdown timer: guarantees teardown completes within SHUTDOWN_TIMEOUT_MS even if backend network freezes
+      this.shutdownTimer = setTimeout(() => {
+        console.warn("[AudioRecorder] Shutdown acknowledgement timed out. Forcing teardown.");
+        this._finishTeardown();
+      }, SHUTDOWN_TIMEOUT_MS);
 
       // Send stop_audio request to backend
       if (this.ws && this.ws.readyState === WebSocket.OPEN && this.sessionId) {
@@ -610,6 +776,14 @@
       this.chunksSent = 0;
       this.bytesSent = 0;
       this.sessionId = null;
+      this.startCallTime = null;
+      this.audioStreamingStartTime = null;
+      this.stopCallTime = null;
+      this.startupLatencyMs = 0;
+      this.shutdownLatencyMs = 0;
+      this.recordingDurationMs = 0;
+      this.lastChunkSentTime = null;
+      this.interruptionCount = 0;
       this._clearError();
       this._setState(State.IDLE, "Session reset. Ready to start.");
       this._notifyStreamlit("idle");
@@ -642,13 +816,22 @@
     }
 
     _finishTeardown() {
+      if (this.shutdownTimer) {
+        clearTimeout(this.shutdownTimer);
+        this.shutdownTimer = null;
+      }
+      if (this.stopCallTime && !this.shutdownLatencyMs) {
+        this.shutdownLatencyMs = Math.round(performance.now() - this.stopCallTime);
+      }
       this._cleanupResources();
-      const finalMsg = `Call stopped. Sent ${this.chunksSent} chunks (${(this.bytesSent / 1024).toFixed(1)} KB).`;
+      const finalMsg = `Call stopped cleanly. Sent ${this.chunksSent} chunks (${(this.bytesSent / 1024).toFixed(1)} KB) in ${(this.recordingDurationMs / 1000).toFixed(1)}s.`;
       this._setState(State.STOPPED, finalMsg);
       this._notifyStreamlit("stopped");
     }
 
     _cleanupResources() {
+      this._clearTimers();
+      this._stopStallDetector();
       this.isAudioStreaming = false;
       this._stopAudioHardware();
 
