@@ -185,3 +185,70 @@ def test_app_handles_component_error_event():
         assert at.session_state["ws_status"] == "error"
         assert at.session_state["session_id"] is None
         assert "Microphone access denied" in at.session_state["status_message"]
+
+
+def test_app_displays_updated_empty_state():
+    """Verify obsolete placeholder is replaced with 'Start recording to see the live transcript.'."""
+    at = AppTest.from_file(APP_PATH).run()
+    assert not at.exception
+    # Check that old placeholder text is absent
+    info_texts = [info.value for info in at.info]
+    assert not any("Once speech-to-text is integrated in future steps" in t for t in info_texts)
+    # Check that new empty state message is present
+    assert any("Start recording to see the live transcript." in t for t in info_texts)
+
+
+def test_app_handles_component_transcript_events():
+    """Verify app receives and renders partial and final transcript events from recorder."""
+    mock_event_partial = {
+        "state": "recording",
+        "session_id": "test-transcript-sid",
+        "audio_state": "streaming",
+        "chunks_sent": 8,
+        "bytes_sent": 64000,
+        "transcripts": [
+            {
+                "segment_id": 1,
+                "speaker": "Sales Rep",
+                "text": "Hello, thank you for calling",
+                "is_final": False,
+                "status": "partial",
+                "timestamp": "2026-10-25T01:30:00Z",
+            }
+        ],
+    }
+
+    with patch("components.audio_recorder.audio_recorder", return_value=mock_event_partial):
+        at = AppTest.from_file(APP_PATH).run()
+        assert not at.exception
+        assert len(at.session_state["transcript_entries"]) == 1
+        entry = at.session_state["transcript_entries"][0]
+        assert entry["text"] == "Hello, thank you for calling"
+        assert entry["is_final"] is False
+
+    mock_event_final = {
+        "state": "recording",
+        "session_id": "test-transcript-sid",
+        "audio_state": "streaming",
+        "chunks_sent": 12,
+        "bytes_sent": 96000,
+        "transcripts": [
+            {
+                "segment_id": 1,
+                "speaker": "Sales Rep",
+                "text": "Hello, thank you for calling today.",
+                "is_final": True,
+                "status": "final",
+                "timestamp": "2026-10-25T01:30:02Z",
+            }
+        ],
+    }
+
+    with patch("components.audio_recorder.audio_recorder", return_value=mock_event_final):
+        at2 = AppTest.from_file(APP_PATH).run()
+        assert not at2.exception
+        assert len(at2.session_state["transcript_entries"]) == 1
+        entry = at2.session_state["transcript_entries"][0]
+        assert entry["text"] == "Hello, thank you for calling today."
+        assert entry["is_final"] is True
+

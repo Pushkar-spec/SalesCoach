@@ -7,7 +7,11 @@ from ws_client import WebSocketClient, get_backend_ws_url, DEFAULT_BACKEND_WS_UR
 def test_default_ws_url(monkeypatch):
     """Verify that get_backend_ws_url returns the default when no env var is set."""
     monkeypatch.delenv("BACKEND_WS_URL", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
     assert get_backend_ws_url() == DEFAULT_BACKEND_WS_URL
+
+    monkeypatch.setenv("PORT", "8001")
+    assert get_backend_ws_url() == "ws://127.0.0.1:8001/ws"
 
     monkeypatch.setenv("BACKEND_WS_URL", "ws://custom-host:9000/ws")
     assert get_backend_ws_url() == "ws://custom-host:9000/ws"

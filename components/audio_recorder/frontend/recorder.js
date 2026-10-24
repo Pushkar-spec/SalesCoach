@@ -52,6 +52,7 @@
       this.audioContext = null;
       this.sourceNode = null;
       this.processorNode = null;
+      this.muteNode = null;
       this.accumulator = null;
 
       // WebSocket
@@ -68,6 +69,10 @@
       this.recordingDurationMs = 0;
       this.lastChunkSentTime = null;
       this.interruptionCount = 0;
+
+      // Real-time STT Transcripts (Step 3.2B)
+      this.transcripts = [];
+      this.latestTranscript = null;
 
       // Bounded Timers
       this.connectTimer = null;
@@ -179,6 +184,8 @@
             expected_bytes: Math.round(((durationMs || 0) / 1000) * 32000),
             interruptions: this.interruptionCount,
           },
+          transcript: this.latestTranscript || null,
+          transcripts: this.transcripts ? [...this.transcripts] : [],
           error: this.errorMessage || null,
           status_message: this.statusMessage || null,
         };
@@ -383,6 +390,8 @@
       this.bytesSent = 0;
       this.sessionId = null;
       this.isAudioStreaming = false;
+      this.transcripts = [];
+      this.latestTranscript = null;
 
       // Monotonic timing initialization
       this.startCallTime = performance.now();
@@ -621,9 +630,54 @@
           this._notifyStreamlit("error");
           break;
 
+        case "transcript":
+          this._handleTranscriptMessage(data);
+          break;
+
         default:
           console.log("[AudioRecorder] Received message type:", data.type);
       }
+    }
+
+    _handleTranscriptMessage(data) {
+      if (!data || typeof data !== "object") return;
+      const segId = data.segment_id;
+      const text = (data.text || "").trim();
+      const isFinal = Boolean(data.is_final);
+      const timestamp = data.timestamp || new Date().toISOString();
+
+      if (!text && !isFinal) return;
+
+      this.latestTranscript = {
+        segment_id: segId,
+        speaker: "Sales Rep",
+        text: text,
+        is_final: isFinal,
+        status: data.status || (isFinal ? "final" : "partial"),
+        timestamp: timestamp,
+        latency_ms: data.latency_ms || 0,
+      };
+
+      const existingIdx = this.transcripts.findIndex(
+        (t) => String(t.segment_id) === String(segId)
+      );
+      if (existingIdx >= 0) {
+        if (this.transcripts[existingIdx].is_final && !isFinal) {
+          // Do not overwrite an already finalized segment with a late partial
+          return;
+        }
+        this.transcripts[existingIdx] = this.latestTranscript;
+      } else {
+        this.transcripts.push(this.latestTranscript);
+      }
+
+      // Live transcript indicator in recorder card
+      if (this.elements.statusText && this.state === State.RECORDING) {
+        const badge = isFinal ? "✓" : "💬";
+        this.elements.statusText.textContent = `${badge} [Live]: "${text}"`;
+      }
+
+      this._notifyStreamlit();
     }
 
     _startAudioPipeline() {
@@ -665,7 +719,11 @@
       };
 
       this.sourceNode.connect(this.processorNode);
-      this.processorNode.connect(this.audioContext.destination);
+      // Mute local speaker playback to prevent acoustic feedback loop
+      this.muteNode = this.audioContext.createGain();
+      this.muteNode.gain.value = 0;
+      this.processorNode.connect(this.muteNode);
+      this.muteNode.connect(this.audioContext.destination);
     }
 
     _handleOutgoingChunk(pcmBuffer) {
@@ -784,6 +842,8 @@
       this.recordingDurationMs = 0;
       this.lastChunkSentTime = null;
       this.interruptionCount = 0;
+      this.transcripts = [];
+      this.latestTranscript = null;
       this._clearError();
       this._setState(State.IDLE, "Session reset. Ready to start.");
       this._notifyStreamlit("idle");
@@ -794,6 +854,10 @@
         this.processorNode.onaudioprocess = null;
         this.processorNode.disconnect();
         this.processorNode = null;
+      }
+      if (this.muteNode) {
+        this.muteNode.disconnect();
+        this.muteNode = null;
       }
       if (this.sourceNode) {
         this.sourceNode.disconnect();

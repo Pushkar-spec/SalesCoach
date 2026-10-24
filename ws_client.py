@@ -9,8 +9,12 @@ and graceful socket closure.
 import json
 import logging
 import os
+import socket
 from typing import Any, Optional
+from dotenv import load_dotenv
 from websockets.sync.client import ClientConnection, connect
+
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +23,22 @@ DEFAULT_BACKEND_WS_URL = "ws://127.0.0.1:8000/ws"
 
 
 def get_backend_ws_url() -> str:
-    """Retrieve the configured backend WebSocket URL from environment or default."""
-    return os.getenv("BACKEND_WS_URL", DEFAULT_BACKEND_WS_URL)
+    """
+    Retrieve the configured backend WebSocket URL from environment or default.
+    Checks:
+    1. BACKEND_WS_URL environment variable
+    2. PORT environment variable (ws://127.0.0.1:{PORT}/ws)
+    3. DEFAULT_BACKEND_WS_URL (ws://127.0.0.1:8000/ws)
+    """
+    env_url = os.getenv("BACKEND_WS_URL")
+    if env_url:
+        return env_url
+
+    port_env = os.getenv("PORT")
+    if port_env:
+        return f"ws://127.0.0.1:{port_env}/ws"
+
+    return DEFAULT_BACKEND_WS_URL
 
 
 class WebSocketClient:

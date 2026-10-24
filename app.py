@@ -14,7 +14,10 @@ from datetime import datetime
 import os
 from typing import Optional
 import uuid
+from dotenv import load_dotenv
 import streamlit as st
+
+load_dotenv(override=True)
 
 from ws_client import WebSocketClient, get_backend_ws_url
 from components.audio_recorder import audio_recorder
@@ -205,7 +208,7 @@ with st.sidebar:
         - **Streamlit WebSocket Link**: `{ws_label}`
         - **Session Protocol**: `{session_label}`
         - **Audio Streaming**: `{audio_label}` *(Unified Step 2.4)*
-        - **Speech-to-Text**: `Not Connected` *(Planned: Phase 3)*
+        - **Speech-to-Text**: `Connected` *(WhisperFlow 1.3.0 / CUDA)*
         - **LLM Sales Coach**: `Not Connected` *(Planned: Phase 4)*
         - **RAG Knowledge**: `Not Connected` *(Planned: Phase 5)*
         """
@@ -320,6 +323,39 @@ if recorder_event and isinstance(recorder_event, dict):
         st.session_state.session_status = "idle"
         st.session_state.ws_status = "disconnected"
 
+    # Synchronize live streaming speech-to-text transcripts
+    if "transcripts" in recorder_event and isinstance(recorder_event["transcripts"], list):
+        merged_entries = []
+        seen_ids = set()
+        for tr in recorder_event["transcripts"]:
+            if not isinstance(tr, dict):
+                continue
+            s_id = str(tr.get("segment_id"))
+            if s_id in seen_ids:
+                for idx, existing in enumerate(merged_entries):
+                    if str(existing.get("segment_id")) == s_id:
+                        if not (existing.get("is_final") and not tr.get("is_final")):
+                            merged_entries[idx] = tr
+                        break
+            else:
+                seen_ids.add(s_id)
+                merged_entries.append(tr)
+        st.session_state.transcript_entries = merged_entries
+    elif "transcript" in recorder_event and isinstance(recorder_event["transcript"], dict):
+        tr = recorder_event["transcript"]
+        seg_id = str(tr.get("segment_id"))
+        text = tr.get("text", "")
+        if text:
+            found = False
+            for entry in st.session_state.transcript_entries:
+                if str(entry.get("segment_id")) == seg_id:
+                    if not (entry.get("is_final") and not tr.get("is_final")):
+                        entry.update(tr)
+                    found = True
+                    break
+            if not found:
+                st.session_state.transcript_entries.append(tr)
+
 st.caption(
     f"Backend Endpoint: `{get_backend_ws_url()}` | "
     "Single authoritative WebSocket connection established directly from browser to FastAPI."
@@ -339,25 +375,27 @@ with col_transcript:
 
     if not st.session_state.transcript_entries:
         st.info(
-            "No transcript entries yet.\n\n"
-            "Once speech-to-text is integrated in future steps, live dialogue between "
-            "the salesperson and customer will appear here in real time.",
-            icon="📝",
+            "Start recording to see the live transcript.",
+            icon="🎙️",
         )
     else:
         for item in st.session_state.transcript_entries:
-            speaker = item.get("speaker", "unknown").lower()
+            speaker = item.get("speaker", "Sales Rep")
             text = item.get("text", "")
             timestamp = item.get("timestamp", "")
+            is_final = item.get("is_final", True)
 
-            if speaker == "customer":
-                with st.chat_message("user"):
-                    st.markdown(f"**Customer** `{timestamp}`")
-                    st.write(text)
-            else:
-                with st.chat_message("assistant"):
-                    st.markdown(f"**Sales Rep** `{timestamp}`")
-                    st.write(text)
+            time_display = timestamp
+            if "T" in timestamp:
+                try:
+                    time_display = timestamp.split("T")[1][:8]
+                except Exception:
+                    pass
+
+            with st.chat_message("user" if speaker.lower() == "customer" else "assistant"):
+                listening_badge = "" if is_final else " *(listening...)*"
+                st.markdown(f"**{speaker}** `{time_display}`{listening_badge}")
+                st.write(text)
 
 # --- Column 2: AI Coaching Suggestions ---
 with col_coaching:

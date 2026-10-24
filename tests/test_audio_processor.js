@@ -192,3 +192,136 @@ describe("Audio Utils — AudioChunkAccumulator", () => {
   });
 });
 
+describe("Audio Recorder — Transcript State Management (Step 3.2B)", () => {
+  test("updates partial transcript with matching segment_id and preserves segment ordering", () => {
+    const transcripts = [];
+    function handleTranscript(data) {
+      const segId = data.segment_id;
+      const text = (data.text || "").trim();
+      const isFinal = Boolean(data.is_final);
+      const entry = {
+        segment_id: segId,
+        speaker: "Sales Rep",
+        text: text,
+        is_final: isFinal,
+        timestamp: data.timestamp || new Date().toISOString(),
+      };
+      const idx = transcripts.findIndex((t) => String(t.segment_id) === String(segId));
+      if (idx >= 0) {
+        transcripts[idx] = entry;
+      } else {
+        transcripts.push(entry);
+      }
+    }
+
+    // 1. First partial event
+    handleTranscript({ segment_id: 1, text: "Hello", is_final: false });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "Hello");
+    assert.strictEqual(transcripts[0].is_final, false);
+
+    // 2. Updated partial event for same segment
+    handleTranscript({ segment_id: 1, text: "Hello world", is_final: false });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "Hello world");
+    assert.strictEqual(transcripts[0].is_final, false);
+
+    // 3. Finalized segment 1
+    handleTranscript({ segment_id: 1, text: "Hello world.", is_final: true });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "Hello world.");
+    assert.strictEqual(transcripts[0].is_final, true);
+
+    // 4. New segment 2
+    handleTranscript({ segment_id: 2, text: "How can I help you?", is_final: true });
+    assert.strictEqual(transcripts.length, 2);
+    assert.strictEqual(transcripts[1].segment_id, 2);
+    assert.strictEqual(transcripts[1].text, "How can I help you?");
+    assert.strictEqual(transcripts[1].is_final, true);
+  });
+
+  test("does not overwrite finalized segment with late out-of-order partial", () => {
+    const transcripts = [];
+    function handleTranscript(data) {
+      const segId = data.segment_id;
+      const text = (data.text || "").trim();
+      const isFinal = Boolean(data.is_final);
+      const entry = {
+        segment_id: segId,
+        speaker: "Sales Rep",
+        text: text,
+        is_final: isFinal,
+        timestamp: data.timestamp || new Date().toISOString(),
+      };
+      const idx = transcripts.findIndex((t) => String(t.segment_id) === String(segId));
+      if (idx >= 0) {
+        if (transcripts[idx].is_final && !isFinal) {
+          return;
+        }
+        transcripts[idx] = entry;
+      } else {
+        transcripts.push(entry);
+      }
+    }
+
+    handleTranscript({ segment_id: 1, text: "Final confirmed sentence.", is_final: true });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "Final confirmed sentence.");
+    assert.strictEqual(transcripts[0].is_final, true);
+
+    handleTranscript({ segment_id: 1, text: "Stale partial", is_final: false });
+    assert.strictEqual(transcripts[0].text, "Final confirmed sentence.");
+    assert.strictEqual(transcripts[0].is_final, true);
+  });
+
+  test("handles string vs numeric segment_id without creating duplicate entries", () => {
+    const transcripts = [];
+    function handleTranscript(data) {
+      const segId = data.segment_id;
+      const text = (data.text || "").trim();
+      const isFinal = Boolean(data.is_final);
+      const entry = {
+        segment_id: segId,
+        speaker: "Sales Rep",
+        text: text,
+        is_final: isFinal,
+        timestamp: data.timestamp || new Date().toISOString(),
+      };
+      const idx = transcripts.findIndex((t) => String(t.segment_id) === String(segId));
+      if (idx >= 0) {
+        if (transcripts[idx].is_final && !isFinal) {
+          return;
+        }
+        transcripts[idx] = entry;
+      } else {
+        transcripts.push(entry);
+      }
+    }
+
+    // 1. Partial with numeric segment_id
+    handleTranscript({ segment_id: 1, text: "We would like", is_final: false });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "We would like");
+
+    // 2. Updated partial with string segment_id
+    handleTranscript({ segment_id: "1", text: "We would like to schedule a demo", is_final: false });
+    assert.strictEqual(transcripts.length, 1, "String segment_id must replace rather than duplicate");
+    assert.strictEqual(transcripts[0].text, "We would like to schedule a demo");
+
+    // 3. Finalized segment with numeric segment_id
+    handleTranscript({ segment_id: 1, text: "We would like to schedule a demo.", is_final: true });
+    assert.strictEqual(transcripts.length, 1);
+    assert.strictEqual(transcripts[0].text, "We would like to schedule a demo.");
+    assert.strictEqual(transcripts[0].is_final, true);
+
+    // 4. Distinct sentence with segment_id 2
+    handleTranscript({ segment_id: 2, text: "Does tomorrow work for you?", is_final: true });
+    assert.strictEqual(transcripts.length, 2);
+    assert.strictEqual(transcripts[0].segment_id, 1);
+    assert.strictEqual(transcripts[1].segment_id, 2);
+    assert.strictEqual(transcripts[0].text, "We would like to schedule a demo.");
+    assert.strictEqual(transcripts[1].text, "Does tomorrow work for you?");
+  });
+});
+
+
